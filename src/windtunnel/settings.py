@@ -21,6 +21,10 @@ QUALITY_PRESETS: dict[str, Quality] = {
 }
 
 
+# Kinematische Viskositaet bei 20 Grad C in m2/s
+MEDIA: dict[str, float] = {"Luft": 1.5e-5, "Wasser": 1.0e-6}
+
+
 @dataclass
 class WslConfig:
     distro: str = "Ubuntu-22.04"
@@ -40,9 +44,18 @@ class TunnelSettings:
     side: float = 3.0  # Halbbreite des Kanals in Fahrzeugbreiten
     top: float = 4.0  # Kanalhoehe in Fahrzeughoehen
     streamline_seeds: int = 9
-    nu: float = 1.5e-5
+    medium: str = "Luft"  # "Luft" = Windkanal, "Wasser" = Wasserkanal
+    draft: float = 1.0  # Wasserkanal: Wasserlinie ueber dem Kiel in m (> Rumpfhoehe = voll getaucht)
     case_name: str = "fahrzeug"
     wsl: WslConfig = field(default_factory=WslConfig)
+
+    @property
+    def is_water(self) -> bool:
+        return self.medium == "Wasser"
+
+    @property
+    def nu(self) -> float:
+        return MEDIA[self.medium]
 
     @property
     def speed_ms(self) -> float:

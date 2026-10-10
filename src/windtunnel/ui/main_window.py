@@ -12,7 +12,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGroupBox, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSpinBox, QTabWidget, QToolBar, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QScrollArea, QSlider, QSpinBox, QTabWidget, QToolBar, QVBoxLayout, QWidget,
 )
 
 from .. import __version__
@@ -21,8 +21,11 @@ from ..geometry import (NATIVE_UNIT_LABEL, UNIT_CHOICES, Placement, VehicleInfo,
                         guess_unit_label, place_vehicle)
 from ..importers import FILE_FILTER, SUPPORTED_EXTENSIONS, GeometryImportError, ImportResult, load_geometry
 from ..results import FlowResults, load_results
+from ..monitor import CpuSample, SystemMonitor
 from ..runner import STEPS, WslRunner, check_wsl
-from ..settings import QUALITY_PRESETS, TunnelSettings, WslConfig
+from ..settings import MEDIA, QUALITY_PRESETS, TunnelSettings, WslConfig
+from ..timing import RunTimer, format_duration
+from .monitor_panel import MonitorPanel
 from .plots import PlotsPanel
 from .viewer import DISPLAY_MODES, TunnelViewer
 
@@ -94,7 +97,7 @@ def _dspin(lo, hi, val, step=1.0, dec=1, suffix="") -> QDoubleSpinBox:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"Virtueller Windkanal {__version__}")
+        self.setWindowTitle(f"Virtueller Wind- und Wasserkanal {__version__}")
         self.resize(1450, 900)
         self.setAcceptDrops(True)
 
@@ -119,6 +122,12 @@ class MainWindow(QMainWindow):
         self._runner.residual.connect(lambda i, n, v: self.plots.add_residual(i, n, v))
         self._runner.progress.connect(self._on_progress)
         self._runner.finished.connect(self._on_run_finished)
+        self.run_timer = RunTimer()
+        self.monitor = SystemMonitor(self)
+        self.monitor.sample.connect(self._on_cpu_sample)
+        self.monitor.failed.connect(lambda m: self.statusBar().showMessage(m))
+        self._clock = QTimer(self, interval=1000)
+        self._clock.timeout.connect(self._tick)
         self._debounce = QTimer(self, singleShot=True, interval=350)
         self._debounce.timeout.connect(self._update_vehicle)
 
@@ -143,6 +152,9 @@ class MainWindow(QMainWindow):
         vl.addWidget(self.result_label)
         self.tabs.addTab(view_tab, "3D-Ansicht")
         self.tabs.addTab(self.plots, "Residuen / Beiwerte")
+        self.monitor_panel = MonitorPanel()
+        self.monitor_panel.toggled.connect(self._toggle_monitor)
+        self.tabs.addTab(self.monitor_panel, "Auslastung")
         self.tabs.addTab(self.log, "Protokoll")
         self.setCentralWidget(self.tabs)
 
@@ -183,6 +195,10 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar()
         self.progress.setMaximumWidth(260)
         self.progress.setVisible(False)
+        self.time_label = QLabel("")
+        self.cpu_label = QLabel("")
+        self.statusBar().addPermanentWidget(self.cpu_label)
+        self.statusBar().addPermanentWidget(self.time_label)
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().showMessage("Geometrie per Menue oder Drag & Drop laden (STL, BIN, STEP, 3MF).")
 
@@ -217,9 +233,28 @@ class MainWindow(QMainWindow):
         return g
 
     def _tunnel_group(self) -> QGroupBox:
-        g = QGroupBox("Windkanal")
+        g = QGroupBox("Kanal")
         f = QFormLayout(g)
-        self.speed = _dspin(5, 400, 100, 5, 0, " km/h")
+        self.medium = QComboBox()
+        self.medium.addItem("Luft (Windkanal)", "Luft")
+        self.medium.addItem("Wasser (Wasserkanal)", "Wasser")
+        self.medium.currentIndexChanged.connect(self._on_medium_changed)
+        f.addRow("Medium", self.medium)
+        self.draft = _dspin(0.01, 1000, 1.0, 0.1, 2, " m")
+        self.draft_slider = QSlider(Qt.Orientation.Horizontal)
+        self.draft_slider.setRange(0, 1000)
+        self.waterline_info = QLabel("")
+        self.waterline_info.setWordWrap(True)
+        f.addRow("Wasserlinie ueber Kiel", self.draft)
+        f.addRow(self.draft_slider)
+        f.addRow(self.waterline_info)
+        self._tunnel_form = f
+        self._water_rows = (self.draft, self.draft_slider, self.waterline_info)
+        for w in self._water_rows:
+            f.setRowVisible(w, False)
+        self.draft.valueChanged.connect(self._on_draft_changed)
+        self.draft_slider.valueChanged.connect(self._on_draft_slider)
+        self.speed = _dspin(0.5, 400, 100, 5, 1, " km/h")
         self.rolling = QCheckBox("Rollende Strasse (bewegter Boden)")
         self.rolling.setChecked(True)
         self.up = _dspin(1, 10, 3, 0.5, 1, " L")
@@ -234,9 +269,37 @@ class MainWindow(QMainWindow):
         f.addRow("Halbbreite (x Fahrzeugbreite)", self.side)
         f.addRow("Hoehe (x Fahrzeughoehe)", self.top)
         f.addRow(self.tunnel_info)
-        for w in (self.up, self.down, self.side, self.top):
+        for w in (self.up, self.down, self.side, self.top, self.speed):
             w.valueChanged.connect(lambda *_: self._update_estimates())
         return g
+
+    def _on_medium_changed(self) -> None:
+        water = self.medium.currentData() == "Wasser"
+        for w in self._water_rows:
+            self._tunnel_form.setRowVisible(w, water)
+        self.top.setEnabled(not water)  # Wasserkanal: Hoehe = Wasserlinie
+        self.viewer.set_medium("Wasser" if water else "Luft")
+        self.chk_domain.setText("Wasserkanal-Box" if water else "Windkanal-Box")
+        if water and self.speed.value() > 30:
+            self.speed.setValue(10)  # Wasser: typisch wenige m/s
+        elif not water and self.speed.value() < 30:
+            self.speed.setValue(100)
+        if water and self.info is not None:
+            self.draft.setValue(max(0.5 * self.info.height, 0.01))
+            if self.clearance.value() == 0:
+                self.clearance.setValue(round(0.5 * self.info.height * 1000))
+        self._update_vehicle()
+
+    def _on_draft_changed(self) -> None:
+        h = self.info.height if self.info else 1.0
+        self.draft_slider.blockSignals(True)
+        self.draft_slider.setValue(min(1000, round(1000 * self.draft.value() / (6 * h))))
+        self.draft_slider.blockSignals(False)
+        self._debounce.start()
+
+    def _on_draft_slider(self, v: int) -> None:
+        h = self.info.height if self.info else 1.0
+        self.draft.setValue(max(0.01, v / 1000 * 6 * h))
 
     def _sim_group(self) -> QGroupBox:
         g = QGroupBox("Netz und Solver")
@@ -307,6 +370,7 @@ class MainWindow(QMainWindow):
             quality=self.quality.currentText(), cores=self.cores.value(), iterations=self.iters.value(),
             upstream=self.up.value(), downstream=self.down.value(), side=self.side.value(),
             top=self.top.value(), streamline_seeds=self.seeds.value(), case_name=name, wsl=self.wsl,
+            medium=self.medium.currentData(), draft=self.draft.value(),
         )
 
     def open_settings(self) -> None:
@@ -364,6 +428,8 @@ class MainWindow(QMainWindow):
         self.viewer.set_flow(None)
         self.result_label.setText("Noch keine Ergebnisse.")
         self._update_vehicle(reset_camera=True)
+        if self.medium.currentData() == "Wasser":
+            self.draft.setValue(max(0.5 * self.info.height, 0.01))
         self.statusBar().showMessage(f"{res.source.name} geladen ({res.mesh.n_cells} Dreiecke).")
 
     def _update_vehicle(self, reset_camera: bool = False) -> None:
@@ -372,7 +438,9 @@ class MainWindow(QMainWindow):
         p = Placement(UNIT_CHOICES[self.unit.currentText()], *(w.value() for w in self.rot),
                       self.clearance.value() / 1000.0)
         self.vehicle = place_vehicle(self.raw, p)
-        self.info = analyze(self.vehicle)
+        water = self.medium.currentData() == "Wasser"
+        waterline = self.vehicle.bounds[4] + self.draft.value() if water else None
+        self.info = analyze(self.vehicle, waterline)
         i = self.info
         warn = "" if i.watertight else (
             f"<br><b style='color:#d9822b'>Netz nicht wasserdicht ({i.open_edges} offene Kanten) - "
@@ -380,6 +448,7 @@ class MainWindow(QMainWindow):
         self.info_label.setText(
             f"L x B x H: {i.length:.2f} x {i.width:.2f} x {i.height:.2f} m<br>"
             f"Stirnflaeche: {i.frontal_area:.3f} m2, Dreiecke: {i.n_triangles}{warn}")
+        self.viewer.set_waterline(waterline, refresh=False)
         self.viewer.set_vehicle(self.vehicle, reset_camera)
         self._update_estimates()
 
@@ -392,7 +461,29 @@ class MainWindow(QMainWindow):
         self.viewer.set_domain(compute_domain(self.info, s))
         cells = estimate_cells(self.info, s)
         self.cells_label.setText(f"ca. {cells / 1e6:.2f} Mio.")
-        self.tunnel_info.setText(f"Blockierung: {100 * blockage_ratio(self.info, s):.1f} %")
+        self.tunnel_info.setText(
+            f"Blockierung: {100 * blockage_ratio(self.info, s):.1f} %   |   "
+            f"Re = {s.speed_ms * self.info.length / s.nu:.2e}"
+            + ("<br>Hinweis: ohne freie Oberflaeche (starrer Deckel)" if s.medium == "Wasser" else ""))
+        self._update_waterline_info(s)
+
+    def _update_waterline_info(self, s: TunnelSettings) -> None:
+        i = self.info
+        if not s.is_water or i is None:
+            self.waterline_info.setText("")
+            return
+        top_gap = i.waterline - i.bounds[5]
+        if top_gap >= 0:
+            text = (f"Voll getaucht: Tauchtiefe {top_gap:.2f} m "
+                    f"({top_gap / i.height:.1f} x Rumpfhoehe), Wassertiefe {i.waterline:.2f} m.")
+            if top_gap < i.height:
+                text += ("<br><b style='color:#d9822b'>Oberflaeche nah: Wellenwiderstand wird nicht "
+                         "erfasst, Ergebnis nur Naeherung.</b>")
+        else:
+            text = (f"Teilweise eingetaucht: {100 * i.immersion:.0f} % der Rumpfhoehe. "
+                    "Rumpf wird an der Wasserlinie geschnitten (Doppelkoerper-Modell), "
+                    "Wellen werden nicht berechnet.")
+        self.waterline_info.setText(text)
 
     # ---------- Simulation ----------
     def start_simulation(self) -> None:
@@ -420,8 +511,14 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(True)
         self.progress.setRange(0, len(STEPS))
         self.progress.setValue(0)
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentWidget(self.plots)
         self._append_log(f"Fall erzeugt: {ci.path}")
+        self.run_timer.start()
+        self._clock.start()
+        self.monitor_panel.clear()
+        self.monitor_panel.set_active(True)
+        self._toggle_monitor(True)
+        self._tick()
         self._runner.start(ci.run_script, s)
 
     def _on_step(self, name: str, idx: int, total: int) -> None:
@@ -431,7 +528,36 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Schritt {idx}/{total}: {name}")
 
     def _on_progress(self, it: int, total: int) -> None:
+        self.run_timer.update_iteration(it, total)
         self.statusBar().showMessage(f"foamRun: Iteration {it}/{total}")
+
+    def _tick(self) -> None:
+        t = self.run_timer
+        if not t.running:
+            self.time_label.setText(f"Gesamtlaufzeit {format_duration(t.elapsed)}" if t.elapsed else "")
+            return
+        text = f"Laufzeit {format_duration(t.elapsed)}"
+        eta = t.eta()
+        if eta is not None:
+            done = t.finish_time()
+            text += f"  |  Restzeit max. {format_duration(eta)} (bis ca. {done:%H:%M})"
+            s = t.seconds_per_iteration()
+            if s:
+                text += f"  |  {s:.2f} s/Iter."
+        elif t.running:
+            text += "  |  Restzeit wird mit Start der Iterationen geschaetzt"
+        self.time_label.setText(text)
+
+    def _toggle_monitor(self, on: bool) -> None:
+        if on:
+            self.monitor.start(self.wsl.distro)
+        else:
+            self.monitor.stop()
+            self.cpu_label.setText("")
+
+    def _on_cpu_sample(self, s: CpuSample) -> None:
+        self.monitor_panel.update_sample(s)
+        self.cpu_label.setText(f"CPU {s.total:.0f} %  |  RAM {s.mem_used_gb:.1f}/{s.mem_total_gb:.0f} GB")
 
     def _append_log(self, line: str) -> None:
         self.log.appendPlainText(line)
@@ -440,12 +566,18 @@ class MainWindow(QMainWindow):
         self.act_run.setEnabled(True)
         self.act_stop.setEnabled(False)
         self.progress.setVisible(False)
+        self.run_timer.stop()
+        self._clock.stop()
+        self._tick()
+        self.monitor_panel.set_active(False)
+        self._toggle_monitor(False)
+        self._append_log(f"Gesamtlaufzeit: {format_duration(self.run_timer.elapsed)}")
         self.statusBar().showMessage(msg)
         if ok and self.case_dir is not None:
             self._load_results(self.case_dir / "results")
             self.tabs.setCurrentIndex(0)
         elif not ok:
-            self.tabs.setCurrentIndex(2)
+            self.tabs.setCurrentWidget(self.log)
             QMessageBox.warning(self, "Simulation", msg + "\nDetails siehe Protokoll.")
 
     # ---------- Ergebnisse ----------
@@ -489,6 +621,7 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 return
             self._runner.cancel()
+        self.monitor.stop()
         self.viewer.close()
         super().closeEvent(e)
 

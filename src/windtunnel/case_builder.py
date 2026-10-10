@@ -54,17 +54,23 @@ class Domain:
         return (self.xmax - self.xmin) * (self.ymax - self.ymin) * (self.zmax - self.zmin)
 
 
+def waterline_z(info: VehicleInfo, s: TunnelSettings) -> float:
+    return info.bounds[4] + max(s.draft, 0.01)
+
+
 def compute_domain(info: VehicleInfo, s: TunnelSettings) -> Domain:
     b = info.bounds
     yc = (b[2] + b[3]) / 2
     half = max(s.side * info.width, 1.5 * info.width)
+    # Wasserkanal: Wasseroberflaeche = starrer Deckel (Symmetrieebene) auf Hoehe der Wasserlinie
+    zmax = waterline_z(info, s) if s.is_water else max(s.top * b[5], 2.0 * b[5])
     return Domain(
         xmin=b[0] - s.upstream * info.length,
         xmax=b[1] + s.downstream * info.length,
         ymin=yc - half,
         ymax=yc + half,
         zmin=0.0,
-        zmax=max(s.top * b[5], 2.0 * b[5]),
+        zmax=zmax,
     )
 
 
@@ -91,6 +97,8 @@ def compute_refinement(info: VehicleInfo, s: TunnelSettings) -> Refinement:
     q = s.preset
     yc = (b[2] + b[3]) / 2
     dx0 = L / q.base_div
+    if s.is_water:  # flacher Kanal: Basiszellen nicht hoeher als 1/3 der Wassertiefe
+        dx0 = min(dx0, (d.zmax - d.zmin) / 3)
     cells = (
         max(4, round((d.xmax - d.xmin) / dx0)),
         max(4, round((d.ymax - d.ymin) / dx0)),
@@ -101,7 +109,7 @@ def compute_refinement(info: VehicleInfo, s: TunnelSettings) -> Refinement:
     near_max = (b[1] + pad, b[3] + pad, b[5] + pad)
     wake_min = (b[1] - 0.2 * L, yc - 0.6 * W - pad, -pad)
     wake_max = (b[1] + 2.0 * L, yc + 0.6 * W + pad, 1.4 * b[5])
-    inside = (b[0] - 0.5 * L, yc, 0.5 * b[5])
+    inside = (b[0] - 0.5 * L, yc, 0.5 * min(b[5], d.zmax))
     return Refinement(near_min, near_max, wake_min, wake_max, inside, cells, dx0)
 
 
@@ -109,8 +117,11 @@ def estimate_cells(info: VehicleInfo, s: TunnelSettings) -> int:
     q = s.preset
     r = compute_refinement(info, s)
 
-    def vol(lo, hi):
-        return math.prod(max(h - l, 0.0) for l, h in zip(lo, hi))
+    d = compute_domain(info, s)
+    lims = ((d.xmin, d.xmax), (d.ymin, d.ymax), (d.zmin, d.zmax))
+
+    def vol(lo, hi):  # nur der Anteil innerhalb des Kanals zaehlt
+        return math.prod(max(min(h, u) - max(l, a), 0.0) for l, h, (a, u) in zip(lo, hi, lims))
 
     base = math.prod(r.cells)
     near = vol(r.near_min, r.near_max) / (r.dx0 / 2**q.near_level) ** 3
@@ -146,7 +157,7 @@ def build_case(case_dir: Path, mesh: pv.PolyData, info: VehicleInfo, s: TunnelSe
         "system/decomposeParDict": _decompose(s),
         "system/functions": _functions(s),
         "system/forceCoeffs": _force_coeffs(info, s),
-        "system/cutPlane": _cut_plane(info),
+        "system/cutPlane": _cut_plane(info, s),
         "constant/momentumTransport": _momentum_transport(),
         "constant/physicalProperties": _physical_properties(s),
         "0/U": _field_u(s),
@@ -484,7 +495,7 @@ def _functions(s: TunnelSettings) -> str:
 
 def _force_coeffs(info: VehicleInfo, s: TunnelSettings) -> str:
     b = info.bounds
-    cofr = ((b[0] + b[1]) / 2, (b[2] + b[3]) / 2, 0.0)
+    cofr = ((b[0] + b[1]) / 2, (b[2] + b[3]) / 2, (b[4] + b[5]) / 2 if s.is_water else 0.0)
     return f"""type            forceCoeffs;
 libs            ("libforces.so");
 
@@ -508,9 +519,10 @@ Aref            {info.frontal_area:.6g};
 """
 
 
-def _cut_plane(info: VehicleInfo) -> str:
+def _cut_plane(info: VehicleInfo, s: TunnelSettings) -> str:
     b = info.bounds
     yc = (b[2] + b[3]) / 2
+    z_cut = 0.5 * (b[4] + min(b[5], waterline_z(info, s))) if s.is_water else 0.4 * b[5]
     return f"""type            surfaces;
 libs            ("libsampling.so");
 
@@ -537,7 +549,7 @@ surfaces
     {{
         type            cutPlane;
         planeType       pointAndNormal;
-        point           (0 0 {0.4 * b[5]:.6g});
+        point           (0 0 {z_cut:.6g});
         normal          (0 0 1);
         interpolate     true;
     }}
@@ -550,6 +562,12 @@ def _streamline_functions(info: VehicleInfo, s: TunnelSettings) -> list[str]:
     yc = (b[2] + b[3]) / 2
     n = s.streamline_seeds
     x = b[0] - 0.3 * info.length
+    if s.is_water:
+        zmax = waterline_z(info, s)
+        z_lo = max(0.04 * zmax, b[4] - 0.4 * info.height)
+        z_hi = min(b[5] + 0.4 * info.height, 0.97 * zmax)
+    else:
+        z_lo, z_hi = 0.04 * b[5], 1.4 * b[5]
     out = []
     for i in range(n):
         frac = 0.0 if n == 1 else (i / (n - 1) - 0.5) * 2  # -1 .. 1
@@ -569,8 +587,8 @@ cloudName       particleTracks{i + 1};
 seedSampleSet
 {{
     type        lineUniform;
-    start       ({x:.6g} {y:.6g} {0.04 * b[5]:.6g});
-    end         ({x:.6g} {y:.6g} {1.4 * b[5]:.6g});
+    start       ({x:.6g} {y:.6g} {z_lo:.6g});
+    end         ({x:.6g} {y:.6g} {z_hi:.6g});
     nPoints     20;
 }}
 """)

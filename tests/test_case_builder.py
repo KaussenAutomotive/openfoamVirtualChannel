@@ -1,3 +1,4 @@
+import pytest
 import pyvista as pv
 
 from windtunnel.case_builder import blockage_ratio, build_case, compute_domain, estimate_cells
@@ -43,3 +44,26 @@ def test_build_case_files(tmp_path):
     assert "numberOfSubdomains  4;" in (c / "system/decomposeParDict").read_text()
     assert b"\r\n" not in (c / "run_wsl.sh").read_bytes()
     assert "#includeFunc streamlines3" in (c / "system/functions").read_text()
+
+
+def test_waterline_wet_frontal_area():
+    mesh, _ = _vehicle()
+    full = analyze(mesh).frontal_area
+    half = analyze(mesh, mesh.bounds[4] + 0.6)
+    assert 0.2 * full < half.frontal_area < 0.8 * full
+    assert half.immersion == pytest.approx(0.5, abs=0.01)
+    assert analyze(mesh, mesh.bounds[5] + 3.0).immersion == 1.0
+
+
+def test_water_domain_follows_waterline(tmp_path):
+    mesh, _ = _vehicle()
+    keel = mesh.bounds[4]
+    for draft in (0.5, 6.0):  # teilweise eingetaucht, tief getaucht (U-Boot)
+        s = TunnelSettings(medium="Wasser", draft=draft, rolling_road=False, cores=4)
+        info = analyze(mesh, keel + draft)
+        assert compute_domain(info, s).zmax == pytest.approx(keel + draft)
+        ci = build_case(tmp_path / f"w{draft}", mesh, info, s)
+        assert ci.domain.zmax == pytest.approx(keel + draft)
+        assert "1e-06" in (ci.path / "constant/physicalProperties").read_text()
+        _, _, z = (float(v) for v in __import__("re").search(r"insidePoint \(([^)]*)\)", (ci.path / "system/snappyHexMeshDict").read_text()).group(1).split())
+        assert 0 < z < keel + draft

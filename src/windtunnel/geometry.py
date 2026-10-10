@@ -56,10 +56,18 @@ class VehicleInfo:
     n_triangles: int
     open_edges: int
     bounds: tuple[float, ...]
+    waterline: float | None = None  # z der Wasserlinie (nur Wasserkanal)
 
     @property
     def watertight(self) -> bool:
         return self.open_edges == 0
+
+    @property
+    def immersion(self) -> float | None:
+        """Eingetauchter Anteil der Rumpfhoehe, 1.0 = ganz unter Wasser."""
+        if self.waterline is None:
+            return None
+        return min(max((self.waterline - self.bounds[4]) / self.height, 0.0), 1.0)
 
 
 def projected_area(mesh: pv.PolyData, n: int = 180) -> float:
@@ -82,20 +90,25 @@ def projected_area(mesh: pv.PolyData, n: int = 180) -> float:
     return hits * dy * dz
 
 
-def analyze(mesh: pv.PolyData) -> VehicleInfo:
+def analyze(mesh: pv.PolyData, waterline: float | None = None) -> VehicleInfo:
+    """Kennwerte; mit waterline wird die Stirnflaeche nur fuer den eingetauchten Teil berechnet."""
     b = mesh.bounds
     open_edges = mesh.extract_feature_edges(
         boundary_edges=True, feature_edges=False, manifold_edges=False, non_manifold_edges=False
     ).n_cells
+    wet = mesh
+    if waterline is not None and waterline < b[5]:
+        wet = mesh.clip(normal=(0, 0, 1), origin=(0, 0, waterline), invert=True)
     return VehicleInfo(
         length=b[1] - b[0],
         width=b[3] - b[2],
         height=b[5] - b[4],
-        frontal_area=projected_area(mesh),
+        frontal_area=projected_area(wet) if wet.n_cells else 0.0,
         surface_area=float(mesh.area),
         n_triangles=mesh.n_cells,
         open_edges=int(open_edges),
         bounds=tuple(b),
+        waterline=waterline,
     )
 
 

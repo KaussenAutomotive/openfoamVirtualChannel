@@ -55,7 +55,7 @@ class WslRunner(QObject):
         self._failed: str | None = None
         self._done = False
         self._cancelled = False
-
+        self._step = ""
     @property
     def running(self) -> bool:
         return self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning
@@ -66,6 +66,7 @@ class WslRunner(QObject):
         self._settings = settings
         self._parser = ResidualParser()
         self._buf, self._failed, self._done, self._cancelled = "", None, False, False
+        self._step = ""
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_output)
@@ -99,13 +100,14 @@ class WslRunner(QObject):
         self.log.emit(line)
         if line.startswith("##STEP "):
             name = line[7:].strip()
+            self._step = name
             idx = STEPS.index(name) + 1 if name in STEPS else 0
             self.step.emit(name, idx, len(STEPS))
         elif line.startswith("##FAIL"):
             self._failed = line[6:].strip() or "Fehler"
         elif line.startswith("##DONE"):
             self._done = True
-        res = self._parser.feed(line)
+        res = self._parser.feed(line) if self._step == "foamRun" else None
         if res is not None:
             it, name, val = res
             self.residual.emit(it, name, val)
