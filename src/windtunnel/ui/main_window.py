@@ -23,8 +23,9 @@ from ..importers import FILE_FILTER, SUPPORTED_EXTENSIONS, GeometryImportError, 
 from ..results import FlowResults, load_results
 from ..monitor import CpuSample, SystemMonitor
 from ..runner import STEPS, WslRunner, check_wsl
-from ..settings import MEDIA, QUALITY_PRESETS, TunnelSettings, WslConfig
+from ..settings import MEDIA, QUALITY_PRESETS, RHO_WATER, TunnelSettings, WslConfig
 from ..timing import RunTimer, format_duration
+from ..vof_case import froude_numbers
 from .monitor_panel import MonitorPanel
 from .plots import PlotsPanel
 from .viewer import DISPLAY_MODES, TunnelViewer
@@ -247,9 +248,13 @@ class MainWindow(QMainWindow):
         self.waterline_info.setWordWrap(True)
         f.addRow("Wasserlinie ueber Kiel", self.draft)
         f.addRow(self.draft_slider)
+        self.chk_vof = QCheckBox("Freie Oberflaeche mit Wellen (Bugwelle, VoF)")
+        self.chk_vof.setToolTip("Zweiphasig Wasser/Luft, instationaer und deutlich rechenintensiver als der starre Deckel.")
+        self.chk_vof.toggled.connect(self._on_vof_toggled)
+        f.addRow(self.chk_vof)
         f.addRow(self.waterline_info)
         self._tunnel_form = f
-        self._water_rows = (self.draft, self.draft_slider, self.waterline_info)
+        self._water_rows = (self.draft, self.draft_slider, self.chk_vof, self.waterline_info)
         for w in self._water_rows:
             f.setRowVisible(w, False)
         self.draft.valueChanged.connect(self._on_draft_changed)
@@ -277,7 +282,7 @@ class MainWindow(QMainWindow):
         water = self.medium.currentData() == "Wasser"
         for w in self._water_rows:
             self._tunnel_form.setRowVisible(w, water)
-        self.top.setEnabled(not water)  # Wasserkanal: Hoehe = Wasserlinie
+        self.top.setEnabled(not water)  # Wasserkanal: Hoehe = Wasserlinie (bzw. Wasserlinie + Luft)
         self.viewer.set_medium("Wasser" if water else "Luft")
         self.chk_domain.setText("Wasserkanal-Box" if water else "Windkanal-Box")
         if water and self.speed.value() > 30:
@@ -288,6 +293,10 @@ class MainWindow(QMainWindow):
             self.draft.setValue(max(0.5 * self.info.height, 0.01))
             if self.clearance.value() == 0:
                 self.clearance.setValue(round(0.5 * self.info.height * 1000))
+        self._update_vehicle()
+
+    def _on_vof_toggled(self, on: bool) -> None:
+        self.rolling.setEnabled(not on)  # VoF: Kanalboden ist eine Gleitwand
         self._update_vehicle()
 
     def _on_draft_changed(self) -> None:
@@ -338,6 +347,8 @@ class MainWindow(QMainWindow):
         self.chk_slice_z = QCheckBox("Schnitt Draufsicht (z)")
         self.chk_streams = QCheckBox("Stromlinien")
         self.chk_streams.setChecked(True)
+        self.chk_waves = QCheckBox("Wasseroberflaeche mit Wellen")
+        self.chk_waves.setChecked(True)
         self.stream_width = _dspin(0.3, 6, 1.5, 0.3, 1, "x")
         self.stream_width.valueChanged.connect(self._apply_display)
         self.stream_density = _dspin(5, 100, 40, 5, 0, " %")
@@ -345,7 +356,7 @@ class MainWindow(QMainWindow):
         f.addRow("Fahrzeug", self.mode)
         f.addRow("Stromlinien-Dicke", self.stream_width)
         f.addRow("Stromlinien-Dichte", self.stream_density)
-        for c in (self.chk_domain, self.chk_slice_y, self.chk_slice_z, self.chk_streams):
+        for c in (self.chk_domain, self.chk_slice_y, self.chk_slice_z, self.chk_streams, self.chk_waves):
             f.addRow(c)
             c.toggled.connect(self._apply_display)
         self.mode.currentIndexChanged.connect(self._apply_display)
@@ -358,6 +369,7 @@ class MainWindow(QMainWindow):
         v.show_slice_y = self.chk_slice_y.isChecked()
         v.show_slice_z = self.chk_slice_z.isChecked()
         v.show_streams = self.chk_streams.isChecked()
+        v.show_waves = self.chk_waves.isChecked()
         v.stream_width = self.stream_width.value()
         v.stream_density = self.stream_density.value() / 100.0
         v.refresh()
@@ -371,6 +383,7 @@ class MainWindow(QMainWindow):
             upstream=self.up.value(), downstream=self.down.value(), side=self.side.value(),
             top=self.top.value(), streamline_seeds=self.seeds.value(), case_name=name, wsl=self.wsl,
             medium=self.medium.currentData(), draft=self.draft.value(),
+            free_surface=self.chk_vof.isChecked(),
         )
 
     def open_settings(self) -> None:
@@ -469,10 +482,23 @@ class MainWindow(QMainWindow):
 
     def _update_waterline_info(self, s: TunnelSettings) -> None:
         i = self.info
-        if not s.is_water or i is None:
+        if not s.is_water or i is None or i.waterline is None:  # info wird nach Medienwechsel neu berechnet
             self.waterline_info.setText("")
             return
         top_gap = i.waterline - i.bounds[5]
+        if s.is_vof:
+            fr, fr_h, lam = froude_numbers(i, s)
+            part = (f"voll getaucht (Tauchtiefe {top_gap:.2f} m)" if top_gap >= 0
+                    else f"{100 * i.immersion:.0f} % der Rumpfhoehe eingetaucht")
+            text = (f"Freie Oberflaeche (VoF): {part}.<br>Froude-Zahl Fr = {fr:.2f}, "
+                    f"Tiefen-Froude Fr_h = {fr_h:.2f}, Wellenlaenge ca. {lam:.1f} m."
+                    "<br>Instationaere Zweiphasenrechnung, deutlich rechenintensiver.")
+            if fr_h > 0.7:
+                text += "<br><b style='color:#d9822b'>Flaches Wasser (Fr_h &gt; 0,7): Wassertiefe vergroessern.</b>"
+            if fr < 0.1:
+                text += "<br>Bei Fr &lt; 0,1 sind die Wellen sehr klein."
+            self.waterline_info.setText(text)
+            return
         if top_gap >= 0:
             text = (f"Voll getaucht: Tauchtiefe {top_gap:.2f} m "
                     f"({top_gap / i.height:.1f} x Rumpfhoehe), Wassertiefe {i.waterline:.2f} m.")
@@ -590,7 +616,8 @@ class MainWindow(QMainWindow):
 
     def _load_results(self, results_dir: Path) -> None:
         try:
-            flow = load_results(results_dir, self.settings().speed_ms)
+            s = self.settings()
+            flow = load_results(results_dir, s.speed_ms, RHO_WATER if s.is_vof else 1.0)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Ergebnisse", f"Ergebnisse konnten nicht geladen werden:\n{exc}")
             return

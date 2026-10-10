@@ -67,3 +67,34 @@ def test_water_domain_follows_waterline(tmp_path):
         assert "1e-06" in (ci.path / "constant/physicalProperties").read_text()
         _, _, z = (float(v) for v in __import__("re").search(r"insidePoint \(([^)]*)\)", (ci.path / "system/snappyHexMeshDict").read_text()).group(1).split())
         assert 0 < z < keel + draft
+
+
+def test_vof_case_files(tmp_path):
+    from windtunnel.case_builder import waterline_z
+    from windtunnel.vof_case import air_height, froude_numbers
+
+    mesh, _ = _vehicle()
+    keel = mesh.bounds[4]
+    s = TunnelSettings(medium="Wasser", free_surface=True, draft=0.5, speed_kmh=9.5, cores=4)
+    info = analyze(mesh, keel + 0.5)
+    assert s.is_vof and not TunnelSettings(medium="Luft", free_surface=True).is_vof
+    d = compute_domain(info, s)
+    assert d.zmax == pytest.approx(waterline_z(info, s) + air_height(info))
+    assert d.ymax - d.ymin >= 2.0 * info.length  # Platz fuer den Kelvin-Keil
+    ci = build_case(tmp_path / "vof", mesh, info, s)
+    c = ci.path
+    for rel in ("0/alpha.water", "0/p_rgh", "0/U", "0/k", "0/omega", "0/nut", "constant/g", "constant/hRef",
+                "constant/phaseProperties", "constant/physicalProperties.water",
+                "constant/physicalProperties.air", "constant/momentumTransport"):
+        assert (c / rel).is_file(), rel
+    assert not (c / "0/p").exists() and not (c / "0/nuTilda").exists()
+    assert "solver          incompressibleVoF;" in (c / "system/controlDict").read_text()
+    assert "localEuler" in (c / "system/fvSchemes").read_text()
+    assert "atmosphere" in (c / "system/blockMeshDict").read_text()
+    assert "waterSlab" in (c / "system/snappyHexMeshDict").read_text()
+    assert "freeSurface" in (c / "system/cutPlane").read_text()
+    assert f"value           {keel + 0.5:.6g};" in (c / "constant/hRef").read_text()
+    script = (c / "run_wsl.sh").read_text()
+    assert "decomposeFields" in script and "potentialFoam" not in script
+    fr, fr_h, lam = froude_numbers(info, s)
+    assert 0.1 < fr < 1 and lam == pytest.approx(2 * 3.14159265 * (9.5 / 3.6) ** 2 / 9.81, rel=1e-3)

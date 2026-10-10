@@ -74,7 +74,8 @@ src/windtunnel/
 - [x] Verifiziert: foamToVTK nutzt -excludePatches (kein -patches); Vehicle-Patch heisst 'vehicle'; Ausgabedateien: forceCoeffs/0/forceCoeffs.dat, streamlinesN/<t>/tracks.vtk, cutPlane/<t>/yNormal.vtk; VTK-Links mit cp -rL kopieren.
 - [x] Laufzeitzaehler mit Restzeitschaetzung (timing.py), Live-CPU/RAM-Auslastung der WSL-VM (monitor.py, Tab "Auslastung"), Wasserkanal (Medium Wasser, nu = 1e-6, starrer Deckel ohne freie Oberflaeche).
 - [x] Wasserlinie/Eintauchtiefe im Wasserkanal (Doppelkoerper-Modell mit starrem Deckel auf Wasserlinie; teilweise und voll getaucht, getestet in WSL).
-- [ ] Offen: Freie Oberflaeche mit VoF (foamRun incompressibleVoF, alpha.water, Wellenwiderstand) fuer Ueberwasserschiffe; Halbmodell/Symmetrie, Raddrehung (MRF), Grenzschichtzellen, Feature-Kanten (surfaceFeatures), PyInstaller-Build, Projektdatei speichern/laden, Live-Cd waehrend des Laufs, Kalibrierung der Zellzahl-Schaetzung an Standard/Fein, GUI-Test mit STEP/3MF-Dateien aus echten CAD-Programmen.
+- [x] Freie Oberflaeche mit VoF (Wellen/Bugwelle) als Option im Wasserkanal (vof_case.py, Tutorial DTCHull als Vorlage, in WSL getestet).
+- [ ] Offen: VoF-Qualitaet verbessern (anisotrope Verfeinerung nur in x/y wie DTCHull mit refineMesh, Wellendaempfung am Auslass, ruhigerer Start), Cd-Anteil Wellenwiderstand getrennt ausweisen; Halbmodell/Symmetrie, Raddrehung (MRF), Grenzschichtzellen, Feature-Kanten (surfaceFeatures), PyInstaller-Build, Projektdatei speichern/laden, Live-Cd waehrend des Laufs, Kalibrierung der Zellzahl-Schaetzung an Standard/Fein, GUI-Test mit STEP/3MF-Dateien aus echten CAD-Programmen.
 
 ## Offene Fragen an den Nutzer
 - ~~Ist `.bin` ein Binary-STL~~ Geklaert: gemeint war OBJ.

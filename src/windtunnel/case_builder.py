@@ -10,7 +10,7 @@ import pyvista as pv
 
 from .foam_utils import VEHICLE_PATCH_REGEX, _hdr, _vec
 from .geometry import VehicleInfo, export_stl
-from .settings import TunnelSettings
+from .settings import G, TunnelSettings
 from .vof_case import FREE_SURFACE_SAMPLE, air_height
 from .vof_case import case_files as vof_files
 from .vof_case import control_dict as vof_control_dict
@@ -97,10 +97,11 @@ def compute_refinement(info: VehicleInfo, s: TunnelSettings) -> Refinement:
     wake_max = (b[1] + 2.0 * L, yc + 0.6 * W + pad, 1.4 * b[5])
     inside = (b[0] - 0.5 * L, yc, 0.5 * min(b[5], d.zmax))
     slab_min = slab_max = None
-    if s.is_vof:  # duenne Platte um die Wasserlinie, Keil nach hinten aufgeweitet
-        z_w, t = waterline_z(info, s), 0.035 * L
-        slab_min = (b[0] - 0.5 * L, yc - 0.5 * W - 1.2 * L, z_w - t)
-        slab_max = (b[1] + 3.0 * L, yc + 0.5 * W + 1.2 * L, z_w + t)
+    if s.is_vof:  # Verfeinerungsschicht um die Wasserlinie ueber den ganzen Kanal
+        z_w = waterline_z(info, s)
+        t = max(0.06 * L, 0.8 * s.speed_ms**2 / (2 * G))  # Bugwellenhoehe ~ U^2/2g
+        slab_min = (d.xmin, d.ymin, z_w - t)
+        slab_max = (d.xmax, d.ymax, z_w + t)
     return Refinement(near_min, near_max, wake_min, wake_max, inside, cells, dx0, slab_min, slab_max)
 
 

@@ -10,7 +10,7 @@ from .results import ResidualParser
 from .settings import TunnelSettings, WslConfig
 
 STEPS = ["Fall kopieren", "blockMesh", "decomposePar", "snappyHexMesh", "checkMesh", "renumberMesh",
-         "potentialFoam", "foamRun", "foamToVTK", "Ergebnisse zurueckkopieren"]
+         "decomposeFields", "potentialFoam", "foamRun", "foamToVTK", "Ergebnisse zurueckkopieren"]
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -56,6 +56,8 @@ class WslRunner(QObject):
         self._done = False
         self._cancelled = False
         self._step = ""
+        self._last_it = -1
+
     @property
     def running(self) -> bool:
         return self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning
@@ -67,6 +69,7 @@ class WslRunner(QObject):
         self._parser = ResidualParser()
         self._buf, self._failed, self._done, self._cancelled = "", None, False, False
         self._step = ""
+        self._last_it = -1
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_output)
@@ -111,7 +114,8 @@ class WslRunner(QObject):
         if res is not None:
             it, name, val = res
             self.residual.emit(it, name, val)
-            if name == "Ux" and self._settings:
+            if self._settings and it != self._last_it:
+                self._last_it = it
                 self.progress.emit(it, self._settings.n_iterations)
 
     def _on_finished(self, code: int, _status) -> None:

@@ -37,6 +37,7 @@ class TunnelViewer(QtInteractor):
         self.show_domain = False
         self.show_slices = True
         self.show_streams = True
+        self.show_waves = True
         self.show_slice_y = False
         self.show_slice_z = False
         self.stream_width = 1.5  # Radius = 0.0015 * Fahrzeuglaenge * Faktor
@@ -77,8 +78,11 @@ class TunnelViewer(QtInteractor):
         b = self._vehicle.bounds
         length = b[1] - b[0]
         if self._flow is not None:
+            ztop = b[5] + 0.3 * length
+            if self._waterline is not None:
+                ztop = max(ztop, self._waterline + 0.15 * length)
             return (b[0] - 0.3 * length, b[1] + 0.9 * length, b[2] - 0.35 * length,
-                    b[3] + 0.35 * length, 0.0, b[5] + 0.3 * length)
+                    b[3] + 0.35 * length, 0.0, ztop)
         ztop = b[5] + 0.1 * length
         if self._waterline is not None:
             ztop = max(ztop, self._waterline + 0.1 * length)
@@ -91,8 +95,11 @@ class TunnelViewer(QtInteractor):
             return None
         b = self._vehicle.bounds
         length = b[1] - b[0]
+        ztop = b[5] + 0.6 * length
+        if self._waterline is not None:
+            ztop = max(ztop, self._waterline + 0.3 * length)
         return (b[0] - 0.6 * length, b[1] + 1.8 * length, b[2] - 0.6 * length,
-                b[3] + 0.6 * length, -0.05, b[5] + 0.6 * length)
+                b[3] + 0.6 * length, -0.05, ztop)
 
     def _streams(self, flow: FlowResults) -> pv.PolyData | None:
         region = self._flow_region()
@@ -125,9 +132,24 @@ class TunnelViewer(QtInteractor):
         return wet, dry
 
     # ---------- Darstellung ----------
+    def _add_waves(self, surface: pv.PolyData) -> None:
+        """Freie Oberflaeche (alpha.water = 0.5), eingefaerbt nach Wellenhoehe ueber der Wasserlinie."""
+        region = self._flow_region()
+        s = surface.clip_box(bounds=(region[0], region[1], region[2], region[3], -1e6, 1e6), invert=False)
+        s = s.extract_surface(algorithm=None)
+        if not s.n_points:
+            return
+        elev = s.points[:, 2] - self._waterline
+        s.point_data["elev"] = elev
+        amp = max(float(np.percentile(np.abs(elev), 98)), 1e-3)
+        self.add_mesh(s, scalars="elev", cmap="coolwarm", clim=(-amp, amp), name="waves", opacity=0.85,
+                      smooth_shading=True, specular=0.6, reset_camera=False,
+                      scalar_bar_args={"title": "Wellenhoehe [m]", "color": "white", "vertical": True,
+                                       "position_x": 0.86, "fmt": "%.3f"})
+
     def refresh(self, reset_camera: bool = False) -> None:
-        for name in ("vehicle", "vehicle_wet", "water", "waterline", "domain", "ground", "slice_yNormal",
-                     "slice_zNormal", "streams"):
+        for name in ("vehicle", "vehicle_wet", "water", "waves", "waterline", "domain", "ground",
+                     "slice_yNormal", "slice_zNormal", "streams"):
             self.remove_actor(name, render=False)
         for title in list(self.scalar_bars.keys()):
             self.remove_scalar_bar(title, render=False)
@@ -179,9 +201,13 @@ class TunnelViewer(QtInteractor):
         if self._vehicle is not None and self._waterline is not None:
             b = self._vehicle.bounds
             length = b[1] - b[0]
-            plane = pv.Plane(center=((b[0] + b[1]) / 2 + 0.5 * length, (b[2] + b[3]) / 2, self._waterline),
-                             direction=(0, 0, 1), i_size=4.0 * length, j_size=1.6 * length)
-            self.add_mesh(plane, color="#4fb3e8", opacity=0.3, name="water", reset_camera=False)
+            wave_surface = flow.slices.get("freeSurface") if flow else None
+            if wave_surface is not None and self.show_waves:
+                self._add_waves(wave_surface)
+            else:
+                plane = pv.Plane(center=((b[0] + b[1]) / 2 + 0.5 * length, (b[2] + b[3]) / 2, self._waterline),
+                                 direction=(0, 0, 1), i_size=4.0 * length, j_size=1.6 * length)
+                self.add_mesh(plane, color="#4fb3e8", opacity=0.3, name="water", reset_camera=False)
             if b[4] < self._waterline < b[5]:
                 line = self._vehicle.slice(normal=(0, 0, 1), origin=(0, 0, self._waterline))
                 if line.n_points:
@@ -202,7 +228,7 @@ class TunnelViewer(QtInteractor):
                 self.add_mesh(tubes, scalars="Umag", cmap=SPEED_CMAP, clim=clim, name="streams",
                               smooth_shading=True, reset_camera=False, specular=0.4,
                               scalar_bar_args={"title": "|U| [m/s]", "color": "white", "vertical": True,
-                                               "n_labels": 5, "fmt": "%.0f"})
+                                               "n_labels": 5, "fmt": "%.0f", "position_x": 0.04})
 
         if reset_camera:
             self.set_view(self._view)

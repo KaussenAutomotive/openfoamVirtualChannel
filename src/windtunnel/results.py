@@ -113,18 +113,22 @@ class FlowResults:
     iteration: str = ""
 
 
-def load_results(results_dir: Path, speed_ms: float) -> FlowResults:
+def _add_cp(data, speed_ms: float, rho: float) -> None:
+    """cp aus p (kinematisch bei rho=1) oder p_rgh (VoF)."""
+    name = "p" if "p" in data else ("p_rgh" if "p_rgh" in data else None)
+    if name:
+        data["cp"] = data[name] / (0.5 * rho * speed_ms**2)
+
+
+def load_results(results_dir: Path, speed_ms: float, rho: float = 1.0) -> FlowResults:
     surface = None
     vtk_files = sorted((results_dir / "VTK").glob("*vehicle*.vtk")) if (results_dir / "VTK").is_dir() else []
     if vtk_files:
-        blocks = [pv.read(str(f)) for f in vtk_files]
+        blocks = [pv.read(str(f)) for f in vtk_files if f.stat().st_size > 512]  # leere Prozessor-Teile ueberspringen
         surface = pv.merge(blocks, merge_points=False).extract_surface(algorithm=None) \
             if len(blocks) > 1 else blocks[0]
-        if "p" in surface.point_data:
-            surface.point_data["cp"] = surface.point_data["p"] / (0.5 * speed_ms**2)
-        elif "p" in surface.cell_data:
-            surface.cell_data["cp"] = surface.cell_data["p"] / (0.5 * speed_ms**2)
         for data in (surface.point_data, surface.cell_data):
+            _add_cp(data, speed_ms, rho)
             if "U" in data:
                 data["Umag"] = np.linalg.norm(data["U"], axis=1)
 
@@ -134,8 +138,7 @@ def load_results(results_dir: Path, speed_ms: float) -> FlowResults:
         s = pv.read(str(f))
         if "U" in s.point_data:
             s.point_data["Umag"] = np.linalg.norm(s.point_data["U"], axis=1)
-        if "p" in s.point_data:
-            s.point_data["cp"] = s.point_data["p"] / (0.5 * speed_ms**2)
+        _add_cp(s.point_data, speed_ms, rho)
         slices[f.stem] = s
 
     tracks = []
