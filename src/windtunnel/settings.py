@@ -21,6 +21,11 @@ QUALITY_PRESETS: dict[str, Quality] = {
 }
 
 
+# Dichte (kg/m3), Erdbeschleunigung (m/s2)
+RHO_WATER = 998.8
+RHO_AIR = 1.0
+NU_AIR = 1.48e-5
+G = 9.81
 # Kinematische Viskositaet bei 20 Grad C in m2/s
 MEDIA: dict[str, float] = {"Luft": 1.5e-5, "Wasser": 1.0e-6}
 
@@ -46,12 +51,17 @@ class TunnelSettings:
     streamline_seeds: int = 9
     medium: str = "Luft"  # "Luft" = Windkanal, "Wasser" = Wasserkanal
     draft: float = 1.0  # Wasserkanal: Wasserlinie ueber dem Kiel in m (> Rumpfhoehe = voll getaucht)
+    free_surface: bool = False  # Wasserkanal: Zweiphasen-VoF mit Wellen statt starrem Deckel
     case_name: str = "fahrzeug"
     wsl: WslConfig = field(default_factory=WslConfig)
 
     @property
     def is_water(self) -> bool:
         return self.medium == "Wasser"
+
+    @property
+    def is_vof(self) -> bool:
+        return self.is_water and self.free_surface
 
     @property
     def nu(self) -> float:
@@ -67,4 +77,5 @@ class TunnelSettings:
 
     @property
     def n_iterations(self) -> int:
-        return self.iterations or self.preset.iterations
+        # VoF mit lokaler Zeitschrittsteuerung braucht deutlich mehr Iterationen
+        return self.iterations or self.preset.iterations * (2 if self.is_vof else 1)

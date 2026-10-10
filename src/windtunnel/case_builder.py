@@ -1,4 +1,4 @@
-"""Erzeugt einen OpenFOAM-Fall (Foundation dev, foamRun/incompressibleFluid) fuer einen Fahrzeug-Windkanal."""
+﻿"""Erzeugt einen OpenFOAM-Fall (Foundation dev, foamRun/incompressibleFluid) fuer einen Fahrzeug-Windkanal."""
 from __future__ import annotations
 
 import math
@@ -8,36 +8,13 @@ from pathlib import Path
 
 import pyvista as pv
 
+from .foam_utils import VEHICLE_PATCH_REGEX, _hdr, _vec
 from .geometry import VehicleInfo, export_stl
 from .settings import TunnelSettings
-
-VEHICLE_PATCH_REGEX = '"vehicle.*"'
-
-_HEADER = """/*--------------------------------*- C++ -*----------------------------------*\\
-  =========                 |
-  \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
-   \\\\    /   O peration     | Website:  https://openfoam.org
-    \\\\  /    A nd           | Version:  dev
-     \\\\/     M anipulation  |
-\\*---------------------------------------------------------------------------*/
-FoamFile
-{{
-    format      ascii;
-    class       {cls};
-    {loc}object      {obj};
-}}
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-
-"""
-
-
-def _hdr(cls: str, obj: str, location: str | None = None) -> str:
-    loc = f'location    "{location}";\n    ' if location else ""
-    return _HEADER.format(cls=cls, obj=obj, loc=loc)
-
-
-def _vec(v) -> str:
-    return "({:.6g} {:.6g} {:.6g})".format(*v)
+from .vof_case import FREE_SURFACE_SAMPLE, air_height
+from .vof_case import case_files as vof_files
+from .vof_case import control_dict as vof_control_dict
+from .vof_case import force_coeffs as vof_force_coeffs
 
 
 @dataclass
@@ -62,8 +39,15 @@ def compute_domain(info: VehicleInfo, s: TunnelSettings) -> Domain:
     b = info.bounds
     yc = (b[2] + b[3]) / 2
     half = max(s.side * info.width, 1.5 * info.width)
-    # Wasserkanal: Wasseroberflaeche = starrer Deckel (Symmetrieebene) auf Hoehe der Wasserlinie
-    zmax = waterline_z(info, s) if s.is_water else max(s.top * b[5], 2.0 * b[5])
+    if s.is_vof:
+        # Wellen: Luftraum ueber der Wasserlinie, breit genug fuer den Kelvin-Keil
+        zmax = waterline_z(info, s) + air_height(info)
+        half = max(half, 1.0 * info.length)
+    elif s.is_water:
+        # Doppelkoerper-Modell: Wasseroberflaeche = starrer Deckel auf Hoehe der Wasserlinie
+        zmax = waterline_z(info, s)
+    else:
+        zmax = max(s.top * b[5], 2.0 * b[5])
     return Domain(
         xmin=b[0] - s.upstream * info.length,
         xmax=b[1] + s.downstream * info.length,
@@ -88,6 +72,8 @@ class Refinement:
     inside_point: tuple[float, float, float]
     cells: tuple[int, int, int]
     dx0: float
+    slab_min: tuple[float, float, float] | None = None  # Verfeinerung an der freien Oberflaeche
+    slab_max: tuple[float, float, float] | None = None
 
 
 def compute_refinement(info: VehicleInfo, s: TunnelSettings) -> Refinement:
@@ -110,7 +96,12 @@ def compute_refinement(info: VehicleInfo, s: TunnelSettings) -> Refinement:
     wake_min = (b[1] - 0.2 * L, yc - 0.6 * W - pad, -pad)
     wake_max = (b[1] + 2.0 * L, yc + 0.6 * W + pad, 1.4 * b[5])
     inside = (b[0] - 0.5 * L, yc, 0.5 * min(b[5], d.zmax))
-    return Refinement(near_min, near_max, wake_min, wake_max, inside, cells, dx0)
+    slab_min = slab_max = None
+    if s.is_vof:  # duenne Platte um die Wasserlinie, Keil nach hinten aufgeweitet
+        z_w, t = waterline_z(info, s), 0.035 * L
+        slab_min = (b[0] - 0.5 * L, yc - 0.5 * W - 1.2 * L, z_w - t)
+        slab_max = (b[1] + 3.0 * L, yc + 0.5 * W + 1.2 * L, z_w + t)
+    return Refinement(near_min, near_max, wake_min, wake_max, inside, cells, dx0, slab_min, slab_max)
 
 
 def estimate_cells(info: VehicleInfo, s: TunnelSettings) -> int:
@@ -127,7 +118,10 @@ def estimate_cells(info: VehicleInfo, s: TunnelSettings) -> int:
     near = vol(r.near_min, r.near_max) / (r.dx0 / 2**q.near_level) ** 3
     wake = vol(r.wake_min, r.wake_max) / (r.dx0 / 2**q.wake_level) ** 3
     surf = info.surface_area / (r.dx0 / 2**q.surf_max) ** 2 * 6
-    return int(base + near + wake * 0.6 + surf)
+    slab = 0.0
+    if r.slab_min is not None:
+        slab = vol(r.slab_min, r.slab_max) / (r.dx0 / 2**q.surf_min) ** 3
+    return int(base + near + wake * 0.6 + surf + slab)
 
 
 @dataclass
@@ -149,7 +143,7 @@ def build_case(case_dir: Path, mesh: pv.PolyData, info: VehicleInfo, s: TunnelSe
     dom = compute_domain(info, s)
     ref = compute_refinement(info, s)
     files = {
-        "system/blockMeshDict": _block_mesh(dom, ref),
+        "system/blockMeshDict": _block_mesh(dom, ref, s),
         "system/snappyHexMeshDict": _snappy(s, ref, info),
         "system/controlDict": _control_dict(s),
         "system/fvSchemes": _FV_SCHEMES,
@@ -165,6 +159,10 @@ def build_case(case_dir: Path, mesh: pv.PolyData, info: VehicleInfo, s: TunnelSe
         "0/nut": _field_nut(),
         "0/nuTilda": _field_nutilda(s),
     }
+    if s.is_vof:
+        for rel in ("constant/momentumTransport", "constant/physicalProperties", "0/U", "0/p", "0/nut", "0/nuTilda"):
+            del files[rel]
+        files.update(vof_files(info, s))
     for i, text in enumerate(_streamline_functions(info, s), start=1):
         files[f"system/streamlines{i}"] = text
     for rel, text in files.items():
@@ -175,8 +173,10 @@ def build_case(case_dir: Path, mesh: pv.PolyData, info: VehicleInfo, s: TunnelSe
     return CaseInfo(case_dir, script, VEHICLE_PATCH_REGEX, dom, estimate_cells(info, s))
 
 
-def _block_mesh(d: Domain, r: Refinement) -> str:
+def _block_mesh(d: Domain, r: Refinement, s: TunnelSettings) -> str:
     x0, x1, y0, y1, z0, z1 = d.xmin, d.xmax, d.ymin, d.ymax, d.zmin, d.zmax
+    top_name, top_type = ("atmosphere", "patch") if s.is_vof else ("upperWall", "symmetryPlane")
+    floor_type = "symmetryPlane" if s.is_vof else "wall"
     verts = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
              (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
     vtxt = "\n".join(f"    {_vec(v)}" for v in verts)
@@ -215,12 +215,12 @@ boundary
     }}
     lowerWall
     {{
-        type wall;
+        type {floor_type};
         faces ((0 3 2 1));
     }}
-    upperWall
+    {top_name}
     {{
-        type symmetryPlane;
+        type {top_type};
         faces ((4 5 6 7));
     }}
 );
@@ -232,6 +232,21 @@ boundary
 def _snappy(s: TunnelSettings, r: Refinement, info: VehicleInfo) -> str:
     q = s.preset
     local = max(100_000, q.max_cells // max(s.cores, 1))
+    slab_geom = slab_region = ""
+    if r.slab_min is not None:
+        slab_geom = f"""    waterSlab
+    {{
+        type box;
+        min {_vec(r.slab_min)};
+        max {_vec(r.slab_max)};
+    }}
+"""
+        slab_region = f"""        waterSlab
+        {{
+            mode    inside;
+            level   {q.surf_min};
+        }}
+"""
     return _hdr("dictionary", "snappyHexMeshDict", "system") + f"""castellatedMesh true;
 snap            true;
 addLayers       false;
@@ -255,7 +270,7 @@ geometry
         min {_vec(r.wake_min)};
         max {_vec(r.wake_max)};
     }}
-}};
+{slab_geom}}};
 
 castellatedMeshControls
 {{
@@ -294,7 +309,7 @@ castellatedMeshControls
             mode    inside;
             level   {q.wake_level};
         }}
-    }}
+{slab_region}    }}
 
     insidePoint {_vec(r.inside_point)};
     allowFreeStandingZoneFaces false;
@@ -341,6 +356,8 @@ mergeTolerance 1e-6;
 
 
 def _control_dict(s: TunnelSettings) -> str:
+    if s.is_vof:
+        return vof_control_dict(s)
     n = s.n_iterations
     interval = max(50, n // 4)
     return _hdr("dictionary", "controlDict", "system") + f"""solver          incompressibleFluid;
@@ -494,6 +511,8 @@ def _functions(s: TunnelSettings) -> str:
 
 
 def _force_coeffs(info: VehicleInfo, s: TunnelSettings) -> str:
+    if s.is_vof:
+        return vof_force_coeffs(info, s)
     b = info.bounds
     cofr = ((b[0] + b[1]) / 2, (b[2] + b[3]) / 2, (b[4] + b[5]) / 2 if s.is_water else 0.0)
     return f"""type            forceCoeffs;
@@ -523,6 +542,8 @@ def _cut_plane(info: VehicleInfo, s: TunnelSettings) -> str:
     b = info.bounds
     yc = (b[2] + b[3]) / 2
     z_cut = 0.5 * (b[4] + min(b[5], waterline_z(info, s))) if s.is_water else 0.4 * b[5]
+    fields = "(p_rgh U)" if s.is_vof else "(p U)"
+    free_surface = FREE_SURFACE_SAMPLE if s.is_vof else ""
     return f"""type            surfaces;
 libs            ("libsampling.so");
 
@@ -531,7 +552,7 @@ writeControl    writeTime;
 surfaceFormat   vtk;
 writeFormat     binary;
 
-fields          (p U);
+fields          {fields};
 
 interpolationScheme cellPoint;
 
@@ -553,7 +574,7 @@ surfaces
         normal          (0 0 1);
         interpolate     true;
     }}
-}}
+{free_surface}}}
 """
 
 
@@ -568,6 +589,7 @@ def _streamline_functions(info: VehicleInfo, s: TunnelSettings) -> list[str]:
         z_hi = min(b[5] + 0.4 * info.height, 0.97 * zmax)
     else:
         z_lo, z_hi = 0.04 * b[5], 1.4 * b[5]
+    fields = "(U)" if s.is_vof else "(p U)"
     out = []
     for i in range(n):
         frac = 0.0 if n == 1 else (i / (n - 1) - 0.5) * 2  # -1 .. 1
@@ -579,7 +601,7 @@ writeControl    writeTime;
 
 setFormat       vtk;
 direction       forward;
-fields          (p U);
+fields          {fields};
 lifeTime        10000;
 nSubCycle       5;
 cloudName       particleTracks{i + 1};
@@ -764,6 +786,24 @@ boundaryField
 
 def _run_script(s: TunnelSettings) -> str:
     w = s.wsl
+    if s.is_vof:
+        steps = """run blockMesh blockMesh
+run decomposePar decomposePar -noFields
+run snappyHexMesh mpirun -np $NP snappyHexMesh -overwrite -parallel
+run_soft checkMesh mpirun -np $NP checkMesh -parallel -latestTime
+run renumberMesh mpirun -np $NP renumberMesh -overwrite -noFields -parallel
+run decomposeFields decomposePar -fields -copyZero
+run foamRun mpirun -np $NP foamRun -parallel
+run_soft foamToVTK mpirun -np $NP foamToVTK -parallel -latestTime -noInternal -fields '(p_rgh U)' -excludePatches '(inlet outlet lowerWall atmosphere front back)'"""
+    else:
+        steps = """run blockMesh blockMesh
+run decomposePar decomposePar -copyZero
+run snappyHexMesh mpirun -np $NP snappyHexMesh -overwrite -parallel
+run_soft checkMesh mpirun -np $NP checkMesh -parallel -latestTime
+run renumberMesh mpirun -np $NP renumberMesh -overwrite -parallel
+run_soft potentialFoam mpirun -np $NP potentialFoam -initialiseUBCs -parallel
+run foamRun mpirun -np $NP foamRun -parallel
+run_soft foamToVTK mpirun -np $NP foamToVTK -parallel -latestTime -noInternal -fields '(p U)' -excludePatches '(inlet outlet lowerWall upperWall front back)'"""
     return f"""#!/bin/bash
 # Von windtunnel erzeugt. Kopiert den Fall ins WSL-Dateisystem, rechnet dort und kopiert Ergebnisse zurueck.
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -793,14 +833,7 @@ cp -r "$SRC"/. "$WORK"/ || {{ echo "##FAIL Kopieren"; exit 1; }}
 rm -rf "$WORK/results"
 cd "$WORK" || exit 1
 
-run blockMesh blockMesh
-run decomposePar decomposePar -copyZero
-run snappyHexMesh mpirun -np $NP snappyHexMesh -overwrite -parallel
-run_soft checkMesh mpirun -np $NP checkMesh -parallel -latestTime
-run renumberMesh mpirun -np $NP renumberMesh -overwrite -parallel
-run_soft potentialFoam mpirun -np $NP potentialFoam -initialiseUBCs -parallel
-run foamRun mpirun -np $NP foamRun -parallel
-run_soft foamToVTK mpirun -np $NP foamToVTK -parallel -latestTime -noInternal -fields '(p U)' -excludePatches '(inlet outlet lowerWall upperWall front back)'
+{steps}
 
 echo "##STEP Ergebnisse zurueckkopieren"
 rm -rf "$SRC/results" && mkdir -p "$SRC/results"
