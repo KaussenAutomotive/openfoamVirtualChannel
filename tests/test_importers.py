@@ -31,22 +31,27 @@ def test_ascii_stl(tmp_path):
     assert load_geometry(p).mesh.n_cells == 12
 
 
-def test_bin_is_binary_stl(tmp_path):
+def test_obj_quads_and_groups(tmp_path):
+    p = tmp_path / "a.obj"
+    p.write_text(
+        "o car\nv 0 0 0\nv 4000 0 0\nv 4000 2000 0\nv 0 2000 0\nv 0 0 1500\nv 4000 0 1500\n"
+        "v 4000 2000 1500\nv 0 2000 1500\n"
+        "g body\nf 1 4 3 2\nf 5 6 7 8\ng sides\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n")
+    r = load_geometry(p)
+    assert r.native_unit is None
+    assert r.mesh.n_cells == 12  # Quads werden trianguliert
+    assert r.mesh.bounds == pytest.approx((0, 4000, 0, 2000, 0, 1500))
+
+
+def test_bin_not_supported(tmp_path):
     p = tmp_path / "a.bin"
-    _write_binary_stl(_box().copy(), tmp_path / "tmp.stl")
-    (tmp_path / "tmp.stl").rename(p)
-    assert load_geometry(p).mesh.n_cells == 12
+    p.write_bytes(b"abc")
+    with pytest.raises(GeometryImportError):
+        load_geometry(p)
 
 
-def test_bin_raw_triangles(tmp_path):
-    tri = np.array([[[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 0, 0], [0, 1, 0], [0, 0, 1]]], dtype="<f4")
-    p = tmp_path / "raw.bin"
-    p.write_bytes(tri.tobytes())
-    assert load_geometry(p).mesh.n_cells == 2
-
-
-def test_garbage_rejected(tmp_path):
-    p = tmp_path / "x.bin"
+def test_garbage_stl_rejected(tmp_path):
+    p = tmp_path / "x.stl"
     p.write_bytes(b"abc")
     with pytest.raises(GeometryImportError):
         load_geometry(p)

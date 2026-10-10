@@ -2,7 +2,7 @@
 
 ## Ziel
 Windows-App zum einfachen Einbinden von OpenFOAM in einen grafischen virtuellen Windkanal für Fahrzeuge.
-Geometrie-Import: **STL, STEP, BIN, 3MF**. Der Workspace ist aktuell leer (noch nichts implementiert).
+Geometrie-Import: **STL, STEP, OBJ, 3MF** (das urspruenglich genannte "BIN" war ein Tippfehler fuer OBJ). Der Workspace ist aktuell leer (noch nichts implementiert).
 
 ## Verifizierte Umgebung (Stand 2026-10-10)
 - Windows, Python 3.14.x (`py -0p`: `C:\Users\thoma\AppData\Local\Python\pythoncore-3.14-64\python.exe`), pip 26.2
@@ -17,7 +17,7 @@ Geometrie-Import: **STL, STEP, BIN, 3MF**. Der Workspace ist aktuell leer (noch 
 
 ## Technik-Entscheidungen
 - GUI: PySide6; 3D-Viewer: pyvista + pyvistaqt (VTK)
-- STL/BIN: pyvista-Reader; `.bin` = Binary-STL (Erkennung über Dateigröße `84 + 50*n`)
+- STL/OBJ: pyvista-Reader (STL binaer ueber Dateigroesse `84 + 50*n` erkannt)
 - 3MF: eigener Reader (zipfile + xml.etree; Build-Items, Components, Transformationen, Einheiten) – keine trimesh/lxml-Abhängigkeit
 - STEP: `gmsh` (pip, OpenCASCADE) -> Oberflächennetz -> STL
 - Einheiten-Auswahl (mm/m) mit Auto-Erkennung aus der Bounding Box (Länge > 20 -> mm)
@@ -31,7 +31,7 @@ pyproject.toml / requirements.txt
 src/windtunnel/
   __main__.py
   settings.py        # Dataclasses: Geschwindigkeit, Qualität, Domain, Boden, WSL-Config
-  importers.py       # stl/bin/step/3mf -> pyvista.PolyData
+  importers.py       # stl/obj/step/3mf -> pyvista.PolyData
   geometry.py        # Skalierung, Rotation, Bodenausrichtung, STL-Export, Bounding Box, Stirnfläche
   case_builder.py    # OpenFOAM-Case erzeugen
   runner.py          # WSL/QProcess-Pipeline
@@ -77,7 +77,7 @@ src/windtunnel/
 - [ ] Offen: Freie Oberflaeche mit VoF (foamRun incompressibleVoF, alpha.water, Wellenwiderstand) fuer Ueberwasserschiffe; Halbmodell/Symmetrie, Raddrehung (MRF), Grenzschichtzellen, Feature-Kanten (surfaceFeatures), PyInstaller-Build, Projektdatei speichern/laden, Live-Cd waehrend des Laufs, Kalibrierung der Zellzahl-Schaetzung an Standard/Fein, GUI-Test mit STEP/3MF-Dateien aus echten CAD-Programmen.
 
 ## Offene Fragen an den Nutzer
-- Ist `.bin` ein Binary-STL (aktuelle Annahme) oder ein anderes Format?
+- ~~Ist `.bin` ein Binary-STL~~ Geklaert: gemeint war OBJ.
 - Soll die App auch Docker/native Windows-OpenFOAM unterstützen oder nur WSL?
 - Stationärer RANS (Standard, Annahme) oder auch transient/LES?
 

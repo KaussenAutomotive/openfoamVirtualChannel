@@ -1,4 +1,4 @@
-"""Import von STL, BIN (Binary-STL), STEP/STP und 3MF als pyvista.PolyData."""
+"""Import von STL, OBJ, STEP/STP und 3MF als pyvista.PolyData."""
 from __future__ import annotations
 
 import os
@@ -11,8 +11,8 @@ from pathlib import Path
 import numpy as np
 import pyvista as pv
 
-SUPPORTED_EXTENSIONS = (".stl", ".bin", ".step", ".stp", ".3mf")
-FILE_FILTER = "3D-Geometrie (*.stl *.bin *.step *.stp *.3mf);;Alle Dateien (*)"
+SUPPORTED_EXTENSIONS = (".stl", ".obj", ".step", ".stp", ".3mf")
+FILE_FILTER = "3D-Geometrie (*.stl *.obj *.step *.stp *.3mf);;Alle Dateien (*)"
 
 UNIT_TO_METER = {
     "micron": 1e-6,
@@ -40,8 +40,10 @@ def load_geometry(path: str | os.PathLike, step_detail: float = 1.0) -> ImportRe
     ext = p.suffix.lower()
     if not p.is_file():
         raise GeometryImportError(f"Datei nicht gefunden: {p}")
-    if ext in (".stl", ".bin"):
-        mesh, unit = _load_stl_like(p), None
+    if ext == ".stl":
+        mesh, unit = _load_stl(p), None
+    elif ext == ".obj":
+        mesh, unit = _load_obj(p), None
     elif ext == ".3mf":
         mesh, unit = load_3mf(p)
     elif ext in (".step", ".stp"):
@@ -75,7 +77,7 @@ def _read_binary_stl(data: bytes) -> np.ndarray | None:
     return None
 
 
-def _load_stl_like(path: Path) -> pv.PolyData:
+def _load_stl(path: Path) -> pv.PolyData:
     data = path.read_bytes()
     tri = _read_binary_stl(data)
     if tri is not None:
@@ -83,12 +85,17 @@ def _load_stl_like(path: Path) -> pv.PolyData:
     head = data[:512].lstrip().lower()
     if head.startswith(b"solid") and b"facet" in data[:2048].lower():
         return pv.read(str(path))
-    # Rohe Dreiecksliste (9 float32 pro Dreieck)
-    if len(data) % 36 == 0 and len(data) > 0:
-        tri = np.frombuffer(data, dtype="<f4").reshape(-1, 3, 3)
-        if np.isfinite(tri).all():
-            return _triangles_to_polydata(tri)
-    raise GeometryImportError("Datei ist weder Binary-/ASCII-STL noch eine rohe Dreiecksliste.")
+    raise GeometryImportError("Datei ist weder Binary- noch ASCII-STL.")
+
+
+def _load_obj(path: Path) -> pv.PolyData:
+    try:
+        mesh = pv.read(str(path))
+    except Exception as exc:  # noqa: BLE001 - VTK wirft generische Fehler
+        raise GeometryImportError(f"OBJ konnte nicht gelesen werden: {exc}") from exc
+    if not isinstance(mesh, pv.PolyData):
+        mesh = mesh.extract_surface(algorithm=None)
+    return mesh
 
 
 def _local(tag: str) -> str:
@@ -217,7 +224,7 @@ def load_step(path: Path, detail: float = 1.0) -> pv.PolyData:
     finally:
         gmsh.finalize()
     try:
-        return _load_stl_like(tmp)
+        return _load_stl(tmp)
     finally:
         tmp.unlink(missing_ok=True)
         tmp.parent.rmdir()

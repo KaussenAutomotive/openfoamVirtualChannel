@@ -200,7 +200,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.cpu_label)
         self.statusBar().addPermanentWidget(self.time_label)
         self.statusBar().addPermanentWidget(self.progress)
-        self.statusBar().showMessage("Geometrie per Menue oder Drag & Drop laden (STL, BIN, STEP, 3MF).")
+        self.statusBar().showMessage("Geometrie per Menue oder Drag & Drop laden (STL, OBJ, STEP, 3MF).")
 
     def _geometry_group(self) -> QGroupBox:
         g = QGroupBox("Geometrie")

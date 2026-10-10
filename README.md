@@ -5,7 +5,7 @@ Geometrie laden, Parameter waehlen, Simulation starten, Cd/Cl, Oberflaechendruck
 
 ## Funktionen
 
-- Import: **STL** (binaer/ASCII), **BIN** (Binary-STL oder rohe float32-Dreiecksliste), **STEP/STP** (ueber Gmsh/OpenCASCADE), **3MF** (inkl. Komponenten, Transformationen, Einheiten). Auch per Drag & Drop.
+- Import: **STL** (binaer/ASCII), **OBJ**, **STEP/STP** (ueber Gmsh/OpenCASCADE), **3MF** (inkl. Komponenten, Transformationen, Einheiten). Auch per Drag & Drop.
 - Einheiten-Erkennung (mm/cm/m/Zoll), Drehung um X/Y/Z, automatisches Aufstellen auf den Boden, optionaler Bodenabstand.
 - Pruefung auf Wasserdichtigkeit, Berechnung der Stirnflaeche (Aref) und der Blockierung.
 - Automatische Case-Erzeugung: `blockMesh` + `snappyHexMesh` (Verfeinerungsboxen, Nachlauf), `foamRun` (`incompressibleFluid`, RANS Spalart-Allmaras, stationaer), Rollende Strasse oder haftender Boden.
